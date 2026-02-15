@@ -1,9 +1,11 @@
 import type { Request, Response } from 'express';
 import { RelayService } from '../services/RelayService.js';
+import { PerformanceMonitor } from '../services/PerformanceMonitor.js';
 import type { PaymentRequest } from '../models/types.js';
 import { z } from 'zod';
 
 const relayService = new RelayService();
+const monitor = PerformanceMonitor.getInstance();
 
 // Validation schema
 const PaymentSchema = z.object({
@@ -42,7 +44,7 @@ export class PaymentController {
 
             const paymentRequest = validation.data as PaymentRequest;
 
-            // Orchestrate payment with risk and failover
+            // Orchestrate payment with risk, failover and circuit breaker
             const orchestration = await relayService.orchestrate(paymentRequest);
             const { result, risk } = orchestration;
 
@@ -59,7 +61,8 @@ export class PaymentController {
                     routingLogic: {
                         reason: PaymentController.getOptimizationReason(result.gatewayId),
                         retries: result.retries || 0,
-                        gateway: result.gatewayId
+                        gateway: result.gatewayId,
+                        wasRecovered: result.retries ? true : false
                     },
                     processedAt: new Date().toISOString()
                 }
@@ -72,6 +75,19 @@ export class PaymentController {
                 traceId: req.headers['x-request-id'] || 'system'
             });
         }
+    }
+
+    /**
+     * Health & Performance Metrics Endpoint (Internal Tooling)
+     */
+    public static async getMetrics(req: Request, res: Response) {
+        const health = monitor.getGlobalInsights();
+        return res.status(200).json({
+            status: 'success',
+            service: 'Quantum-Orchestrator',
+            timestamp: new Date().toISOString(),
+            gateways: health
+        });
     }
 
     private static getOptimizationReason(gatewayId: string): string {

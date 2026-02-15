@@ -50,6 +50,14 @@ export interface GatewayResponse {
     originalError?: string;
 }
 
+export interface GatewayPerformanceMetrics {
+    avgLatencyMs: number;
+    approvalRate: number;
+    totalVolume: number;
+    circuitState: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+    lastErrorRate: number;
+}
+
 export type RiskLevel = 'low' | 'medium' | 'high';
 
 export interface InternalRiskAssessment {

@@ -8,6 +8,7 @@ const router = Router();
  * @desc Process a payment with dynamic orchestration (routing)
  */
 router.post('/process', PaymentController.processPayment);
+router.get('/metrics', PaymentController.getMetrics);
 
 // Health check
 router.get('/health', (req, res) => res.status(200).json({ status: 'OK', service: 'Quantum-Relay-RelayService' }));

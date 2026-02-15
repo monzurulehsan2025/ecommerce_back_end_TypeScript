@@ -1,11 +1,11 @@
 import fetch from 'node-fetch';
 
-const API_URL = 'http://localhost:3000/api/v1/payments/process';
+const BASE_URL = 'http://localhost:3000/api/v1/payments';
 
 async function testRoute(name, payload) {
     console.log(`\n--- [TEST] ${name} ---`);
     try {
-        const response = await fetch(API_URL, {
+        const response = await fetch(`${BASE_URL}/process`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -15,14 +15,11 @@ async function testRoute(name, payload) {
         if (data.status === 'success') {
             console.log('✅ Gateway:', data.transaction.gatewayId);
             console.log('🛡️  Risk Level:', data.telemetry.riskAssessment.level.toUpperCase(), `(Score: ${data.telemetry.riskAssessment.score})`);
-            if (data.telemetry.riskAssessment.flags.length > 0) {
-                console.log('🚩 Flags:', data.telemetry.riskAssessment.flags.join(', '));
-            }
             console.log('💡 Logic:', data.telemetry.routingLogic.reason);
-            console.log('⏱️  Time:', data.transaction.processingTimeMs, 'ms');
-            if (data.transaction.retries) {
-                console.log('🔄 Retries:', data.transaction.retries, '(Auto-Failover Triggered)');
+            if (data.telemetry.routingLogic.wasRecovered) {
+                console.log('⚡ RECOV:', 'YES (Circuit Breaker or Failover triggered)');
             }
+            console.log('⏱️  Time:', data.transaction.processingTimeMs, 'ms');
         } else {
             console.log('❌ Failed:', data.message || 'Validation Error');
         }
@@ -31,56 +28,50 @@ async function testRoute(name, payload) {
     }
 }
 
+async function showMetrics() {
+    console.log('\n📊 --- [GATEWAY PERFORMANCE METRICS] ---');
+    try {
+        const response = await fetch(`${BASE_URL}/metrics`);
+        const data = await response.json();
+        console.table(data.gateways);
+    } catch (error) {
+        console.error('Could not fetch metrics.');
+    }
+}
+
 const basePayload = {
     amount: 250.00,
     currency: 'GBP',
     paymentMethod: {
-        type: 'card',
-        brand: 'visa',
-        last4: '4242',
-        expiryMonth: 12,
-        expiryYear: 2026,
-        country: 'UK'
+        type: 'card', brand: 'visa', last4: '4242', expiryMonth: 12, expiryYear: 2026, country: 'UK'
     },
     metadata: {
         userId: '123e4567-e89b-12d3-a456-426614174000',
-        userLocation: {
-            city: 'London',
-            country: 'UK',
-            timezone: 'Europe/London'
-        },
+        userLocation: { city: 'London', country: 'UK', timezone: 'Europe/London' },
         deviceIp: '1.2.3.4',
         timestamp: new Date().toISOString()
     }
 };
 
 async function runTests() {
-    console.log('🚀 Starting Smart Orchestration Test Suite...');
+    console.log('🚀 Starting Quantum Advanced Orchestration Suite...');
 
-    // 1. STANDARD LONDON NIGHT (Low Risk)
-    const londonNight = JSON.parse(JSON.stringify(basePayload));
-    londonNight.metadata.timestamp = new Date(new Date().setHours(3, 0, 0, 0)).toISOString();
-    await testRoute('London (3:00 AM) - Optimized Local Route', londonNight);
+    // 1. Show initial metrics
+    await showMetrics();
 
-    // 2. HIGH RISK TEST (High Ticket + Off Hours)
+    // 2. High risk transaction
     const highRisk = JSON.parse(JSON.stringify(basePayload));
-    highRisk.amount = 7500.00; // High ticket
-    highRisk.metadata.timestamp = new Date(new Date().setHours(4, 0, 0, 0)).toISOString(); // Off hours
-    await testRoute('High Risk (7.5k + 4:00 AM) - Secure Vault Route', highRisk);
+    highRisk.amount = 8000;
+    await testRoute('High Risk (7.5k+) - Secure Vault', highRisk);
 
-    // 3. CURRENCY MISMATCH TEST (Medium Risk)
-    const mismatch = JSON.parse(JSON.stringify(basePayload));
-    mismatch.currency = 'USD';
-    mismatch.metadata.userLocation.country = 'FR';
-    await testRoute('Currency Mismatch - Adyen EU Route', mismatch);
-
-    // 4. FAILOVER TEST (Simulated randomly in code, we'll try a few times)
-    console.log('\n--- Running Failover Stress Test ---');
+    // 3. Stress test for failures & metrics
+    console.log('\n--- Generating Traffic (5 Requests) ---');
     for (let i = 0; i < 5; i++) {
-        const failoverTrial = JSON.parse(JSON.stringify(basePayload));
-        failoverTrial.metadata.userLocation.country = 'US'; // Route to Stripe US
-        await testRoute(`Failover Trial ${i + 1}`, failoverTrial);
+        await testRoute(`Transaction ${i + 1}`, basePayload);
     }
+
+    // 4. Show final metrics with performance & health
+    await showMetrics();
 }
 
 runTests();
