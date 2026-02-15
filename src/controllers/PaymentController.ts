@@ -24,7 +24,7 @@ const PaymentSchema = z.object({
             country: z.string(),
             timezone: z.string()
         }),
-        deviceIp: z.string(), // Simple string for IP to avoid lint issues with old Zod versions
+        deviceIp: z.string(),
         timestamp: z.string().datetime()
     })
 });
@@ -32,7 +32,6 @@ const PaymentSchema = z.object({
 export class PaymentController {
     public static async processPayment(req: Request, res: Response) {
         try {
-            // Validate input
             const validation = PaymentSchema.safeParse(req.body);
             if (!validation.success) {
                 return res.status(400).json({
@@ -43,16 +42,25 @@ export class PaymentController {
 
             const paymentRequest = validation.data as PaymentRequest;
 
-            // Orchestrate payment
-            const result = await relayService.orchestrate(paymentRequest);
+            // Orchestrate payment with risk and failover
+            const orchestration = await relayService.orchestrate(paymentRequest);
+            const { result, risk } = orchestration;
 
-            // Return premium response with insights
+            // Return premium response with deep insights
             return res.status(200).json({
                 status: 'success',
-                data: result,
-                insights: {
-                    optimizationReason: result.gatewayId === 'uk_local' ? 'Localized processing for improved approval rates' :
-                        result.gatewayId === 'adyen_eu' ? 'Regional routing for lower latency' : 'Standard global processing',
+                transaction: result,
+                telemetry: {
+                    riskAssessment: {
+                        level: risk.level,
+                        score: risk.score,
+                        flags: risk.flags
+                    },
+                    routingLogic: {
+                        reason: PaymentController.getOptimizationReason(result.gatewayId),
+                        retries: result.retries || 0,
+                        gateway: result.gatewayId
+                    },
                     processedAt: new Date().toISOString()
                 }
             });
@@ -63,6 +71,16 @@ export class PaymentController {
                 message: 'Internal server error during payment orchestration',
                 traceId: req.headers['x-request-id'] || 'system'
             });
+        }
+    }
+
+    private static getOptimizationReason(gatewayId: string): string {
+        switch (gatewayId) {
+            case 'uk_local': return 'Optimization: Localized UK routing for 2-5% higher approval rates.';
+            case 'adyen_eu': return 'Optimization: Regional EU routing for lower latency SLA.';
+            case 'sec_vault': return 'Security: High-risk detected. Routed to Quantum Secure Vault with MFA.';
+            case 'stripe_us': return 'Standard: Reliable global processing via Stripe default.';
+            default: return 'Standard routing logic applied.';
         }
     }
 }

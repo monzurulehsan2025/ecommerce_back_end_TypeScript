@@ -3,7 +3,7 @@ import fetch from 'node-fetch';
 const API_URL = 'http://localhost:3000/api/v1/payments/process';
 
 async function testRoute(name, payload) {
-    console.log(`\n--- Testing Case: ${name} ---`);
+    console.log(`\n--- [TEST] ${name} ---`);
     try {
         const response = await fetch(API_URL, {
             method: 'POST',
@@ -11,10 +11,21 @@ async function testRoute(name, payload) {
             body: JSON.stringify(payload)
         });
         const data = await response.json();
-        console.log('Target Gateway:', data.data?.gatewayId);
-        console.log('Impact Reward:', data.insights?.optimizationReason);
-        console.log('Processing Fee:', data.data?.fee);
-        console.log('Response Time:', data.data?.processingTimeMs, 'ms');
+
+        if (data.status === 'success') {
+            console.log('✅ Gateway:', data.transaction.gatewayId);
+            console.log('🛡️  Risk Level:', data.telemetry.riskAssessment.level.toUpperCase(), `(Score: ${data.telemetry.riskAssessment.score})`);
+            if (data.telemetry.riskAssessment.flags.length > 0) {
+                console.log('🚩 Flags:', data.telemetry.riskAssessment.flags.join(', '));
+            }
+            console.log('💡 Logic:', data.telemetry.routingLogic.reason);
+            console.log('⏱️  Time:', data.transaction.processingTimeMs, 'ms');
+            if (data.transaction.retries) {
+                console.log('🔄 Retries:', data.transaction.retries, '(Auto-Failover Triggered)');
+            }
+        } else {
+            console.log('❌ Failed:', data.message || 'Validation Error');
+        }
     } catch (error) {
         console.error('Test failed. Is the server running?', error.message);
     }
@@ -44,29 +55,32 @@ const basePayload = {
 };
 
 async function runTests() {
-    // 1. London at 3 AM logic
+    console.log('🚀 Starting Smart Orchestration Test Suite...');
+
+    // 1. STANDARD LONDON NIGHT (Low Risk)
     const londonNight = JSON.parse(JSON.stringify(basePayload));
     londonNight.metadata.timestamp = new Date(new Date().setHours(3, 0, 0, 0)).toISOString();
-    await testRoute('London (3:00 AM) - Local UK Route', londonNight);
+    await testRoute('London (3:00 AM) - Optimized Local Route', londonNight);
 
-    // 2. Paris during the day
-    const parisDay = JSON.parse(JSON.stringify(basePayload));
-    parisDay.metadata.userLocation.city = 'Paris';
-    parisDay.metadata.userLocation.country = 'FR';
-    parisDay.metadata.timestamp = new Date(new Date().setHours(14, 0, 0, 0)).toISOString();
-    await testRoute('Paris (2:00 PM) - Adyen EU Route', parisDay);
+    // 2. HIGH RISK TEST (High Ticket + Off Hours)
+    const highRisk = JSON.parse(JSON.stringify(basePayload));
+    highRisk.amount = 7500.00; // High ticket
+    highRisk.metadata.timestamp = new Date(new Date().setHours(4, 0, 0, 0)).toISOString(); // Off hours
+    await testRoute('High Risk (7.5k + 4:00 AM) - Secure Vault Route', highRisk);
 
-    // 3. New York
-    const ny = JSON.parse(JSON.stringify(basePayload));
-    ny.metadata.userLocation.city = 'New York';
-    ny.metadata.userLocation.country = 'US';
-    ny.currency = 'USD';
-    await testRoute('New York - Stripe Default Route', ny);
+    // 3. CURRENCY MISMATCH TEST (Medium Risk)
+    const mismatch = JSON.parse(JSON.stringify(basePayload));
+    mismatch.currency = 'USD';
+    mismatch.metadata.userLocation.country = 'FR';
+    await testRoute('Currency Mismatch - Adyen EU Route', mismatch);
+
+    // 4. FAILOVER TEST (Simulated randomly in code, we'll try a few times)
+    console.log('\n--- Running Failover Stress Test ---');
+    for (let i = 0; i < 5; i++) {
+        const failoverTrial = JSON.parse(JSON.stringify(basePayload));
+        failoverTrial.metadata.userLocation.country = 'US'; // Route to Stripe US
+        await testRoute(`Failover Trial ${i + 1}`, failoverTrial);
+    }
 }
-
-// Note: This requires node-fetch to be installed if running outside the workspace, 
-// but since we are just writing it for the user to see/use, it's fine.
-// I'll add node-fetch to dependencies just in case.
-console.log('Note: To run this test, first start the server with "npm run dev"');
 
 runTests();
