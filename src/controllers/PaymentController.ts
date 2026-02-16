@@ -69,7 +69,7 @@ export class PaymentController {
      */
     public static async getMetrics(req: Request, res: Response) {
         try {
-            const health = monitor.getGlobalInsights();
+            const health = await monitor.getCentralizedInsights();
             return res.status(200).json({
                 status: 'success',
                 service: 'Quantum-Orchestrator',

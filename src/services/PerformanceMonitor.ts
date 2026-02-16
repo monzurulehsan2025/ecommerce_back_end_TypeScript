@@ -1,11 +1,17 @@
 import type { GatewayPerformanceMetrics } from '../models/types.js';
 import { Logger } from '../utils/Logger.js';
+import cluster from 'node:cluster';
 
 export enum CircuitState {
     CLOSED = 'CLOSED',
     OPEN = 'OPEN',
     HALF_OPEN = 'HALF_OPEN'
 }
+
+export type MetricMessage =
+    | { type: 'METRIC_UPDATE'; gatewayId: string; success: boolean; latency: number }
+    | { type: 'GET_METRICS_REQUEST'; requestId: string }
+    | { type: 'GET_METRICS_RESPONSE'; requestId: string; metrics: Record<string, GatewayPerformanceMetrics> };
 
 class GatewayStats {
     public totalRequests = 0;
@@ -44,10 +50,17 @@ class GatewayStats {
 export class PerformanceMonitor {
     private static instance: PerformanceMonitor;
     private stats: Map<string, GatewayStats> = new Map();
-    private readonly RECOVERY_TIMEOUT = 30000; // 30 seconds
-    private readonly FAILURE_THRESHOLD = 3;
+    private readonly RECOVERY_TIMEOUT = 30000;
+    private readonly FAILURE_THRESHOLD = 5;
+    private pendingRequests: Map<string, (data: any) => void> = new Map();
 
-    private constructor() { }
+    private constructor() {
+        if (cluster.isPrimary) {
+            this.setupPrimaryListener();
+        } else {
+            this.setupWorkerListener();
+        }
+    }
 
     public static getInstance(): PerformanceMonitor {
         if (!PerformanceMonitor.instance) {
@@ -56,32 +69,83 @@ export class PerformanceMonitor {
         return PerformanceMonitor.instance;
     }
 
+    private setupPrimaryListener() {
+        cluster.on('message', (worker, message: MetricMessage) => {
+            if (!message) return;
+
+            if (message.type === 'METRIC_UPDATE') {
+                this.internalRecord(message.gatewayId, message.success, message.latency);
+            } else if (message.type === 'GET_METRICS_REQUEST') {
+                worker.send({
+                    type: 'GET_METRICS_RESPONSE',
+                    requestId: message.requestId,
+                    metrics: this.getGlobalInsights()
+                });
+            }
+        });
+    }
+
+    private setupWorkerListener() {
+        process.on('message', (message: MetricMessage) => {
+            if (message && message.type === 'GET_METRICS_RESPONSE') {
+                const resolve = this.pendingRequests.get(message.requestId);
+                if (resolve) {
+                    resolve(message.metrics);
+                    this.pendingRequests.delete(message.requestId);
+                }
+            }
+        });
+    }
+
     public record(gatewayId: string, success: boolean, latency: number) {
+        if (cluster.isWorker && process.send) {
+            process.send({ type: 'METRIC_UPDATE', gatewayId, success, latency });
+        }
+        this.internalRecord(gatewayId, success, latency);
+    }
+
+    private internalRecord(gatewayId: string, success: boolean, latency: number) {
         if (!this.stats.has(gatewayId)) {
             this.stats.set(gatewayId, new GatewayStats());
         }
         const stat = this.stats.get(gatewayId)!;
         stat.update(success, latency);
 
-        // Dynamic Circuit Breaker Logic
         if (stat.consecutiveFailures >= this.FAILURE_THRESHOLD && stat.state === CircuitState.CLOSED) {
-            Logger.warn(`🚨 Opening circuit for ${gatewayId} due to high failure rate.`, 'CircuitBreaker');
+            Logger.warn(`🚨 Opening circuit for ${gatewayId}`, 'CircuitBreaker');
             stat.state = CircuitState.OPEN;
         }
 
-        // Attempt recovery after timeout
         if (stat.state === CircuitState.OPEN && Date.now() - stat.lastFailureTime > this.RECOVERY_TIMEOUT) {
-            Logger.info(`🛡️ Attempting recovery for ${gatewayId} (HALF_OPEN).`, 'CircuitBreaker');
             stat.state = CircuitState.HALF_OPEN;
         }
+    }
+
+    public async getCentralizedInsights(): Promise<Record<string, GatewayPerformanceMetrics>> {
+        if (cluster.isPrimary) {
+            return this.getGlobalInsights();
+        }
+
+        return new Promise((resolve) => {
+            const requestId = Math.random().toString(36).substring(7);
+            const timeout = setTimeout(() => {
+                this.pendingRequests.delete(requestId);
+                resolve(this.getGlobalInsights()); // Fallback to local
+            }, 1000);
+
+            this.pendingRequests.set(requestId, (data) => {
+                clearTimeout(timeout);
+                resolve(data);
+            });
+
+            process.send!({ type: 'GET_METRICS_REQUEST', requestId });
+        });
     }
 
     public isHealthy(gatewayId: string): boolean {
         const stat = this.stats.get(gatewayId);
         if (!stat) return true;
-
         if (stat.state === CircuitState.OPEN) {
-            // Recheck timeout on every check
             if (Date.now() - stat.lastFailureTime > this.RECOVERY_TIMEOUT) {
                 stat.state = CircuitState.HALF_OPEN;
                 return true;
