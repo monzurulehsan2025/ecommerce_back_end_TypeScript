@@ -1,93 +1,18 @@
-import type { PaymentRequest, GatewayResponse, RoutingRule, InternalRiskAssessment } from '../models/types.js';
+import type { PaymentRequest, GatewayResponse, InternalRiskAssessment } from '../models/types.js';
 import { RiskService } from './RiskService.js';
 import { PerformanceMonitor } from './PerformanceMonitor.js';
-import { v4 as uuidv4 } from 'uuid';
-
-export interface IPaymentGateway {
-    id: string;
-    name: string;
-    uptime: number; // 0 to 1, simulated
-    process(request: PaymentRequest): Promise<GatewayResponse>;
-}
-
-const monitor = PerformanceMonitor.getInstance();
-
-// Mock Gateways
-class StripeGateway implements IPaymentGateway {
-    id = 'stripe_us';
-    name = 'Stripe (US East)';
-    uptime = 0.99;
-    async process(request: PaymentRequest): Promise<GatewayResponse> {
-        const startTime = Date.now();
-        await new Promise(resolve => setTimeout(resolve, 150));
-
-        // Simulate intermittent failure for failover demonstration
-        if (Math.random() < 0.05) throw new Error('Gateway Timeout');
-
-        return {
-            success: true,
-            transactionId: `st_${uuidv4()}`,
-            gatewayId: this.id,
-            fee: request.amount * 0.029 + 0.3,
-            processingTimeMs: Date.now() - startTime
-        };
-    }
-}
-
-class AdyenEuropeGateway implements IPaymentGateway {
-    id = 'adyen_eu';
-    name = 'Adyen (Europe/Amsterdam)';
-    uptime = 0.995;
-    async process(request: PaymentRequest): Promise<GatewayResponse> {
-        const startTime = Date.now();
-        await new Promise(resolve => setTimeout(resolve, 80));
-        return {
-            success: true,
-            transactionId: `ad_${uuidv4()}`,
-            gatewayId: this.id,
-            fee: request.amount * 0.02 + 0.1,
-            processingTimeMs: Date.now() - startTime
-        };
-    }
-}
-
-class UKLocalAcquirer implements IPaymentGateway {
-    id = 'uk_local';
-    name = 'UK Local Merchant Services';
-    uptime = 0.98;
-    async process(request: PaymentRequest): Promise<GatewayResponse> {
-        const startTime = Date.now();
-        await new Promise(resolve => setTimeout(resolve, 40));
-        return {
-            success: true,
-            transactionId: `uk_${uuidv4()}`,
-            gatewayId: this.id,
-            fee: request.amount * 0.015 + 0.05,
-            processingTimeMs: Date.now() - startTime
-        };
-    }
-}
-
-class HighSecurityGateway implements IPaymentGateway {
-    id = 'sec_vault';
-    name = 'Quantum Secure Vault (High Risk Only)';
-    uptime = 1.0;
-    async process(request: PaymentRequest): Promise<GatewayResponse> {
-        const startTime = Date.now();
-        await new Promise(resolve => setTimeout(resolve, 600));
-        return {
-            success: true,
-            transactionId: `sv_${uuidv4()}`,
-            gatewayId: this.id,
-            fee: request.amount * 0.05 + 2.0,
-            processingTimeMs: Date.now() - startTime,
-            message: 'Processed via High-Security MFA flow'
-        };
-    }
-}
+import { StripeGateway } from './gateways/StripeGateway.js';
+import { AdyenEuropeGateway } from './gateways/AdyenEuropeGateway.js';
+import { UKLocalAcquirer } from './gateways/UKLocalAcquirer.js';
+import { HighSecurityGateway } from './gateways/HighSecurityGateway.js';
+import type { IPaymentGateway } from './gateways/IPaymentGateway.js';
+import { Logger } from '../utils/Logger.js';
+import { PaymentGatewayError } from '../utils/AppError.js';
 
 export class RelayService {
     private gateways: Map<string, IPaymentGateway> = new Map();
+    private monitor = PerformanceMonitor.getInstance();
+    private readonly DEFAULT_GATEWAY_ID = 'stripe_us';
 
     constructor() {
         this.registerGateway(new StripeGateway());
@@ -106,79 +31,93 @@ export class RelayService {
      */
     public async orchestrate(request: PaymentRequest): Promise<{ result: GatewayResponse, risk: InternalRiskAssessment }> {
         const startTime = Date.now();
-        console.log(`[RelayService] New incoming request: ${request.amount} ${request.currency}`);
+        Logger.info(`New incoming request: ${request.amount} ${request.currency}`, 'RelayService');
 
         const risk = RiskService.analyze(request);
-        console.log(`[RelayService] Risk Assessment: ${risk.level.toUpperCase()} (Score: ${risk.score})`);
+        Logger.info(`Risk Assessment: ${risk.level.toUpperCase()} (Score: ${risk.score})`, 'RelayService');
 
         let primaryGatewayId: string;
 
         if (risk.level === 'high') {
-            console.log('[Orchestration Engine] HIGH RISK detected. Overriding to Secure Vault.');
+            Logger.warn('[Orchestration Engine] HIGH RISK detected. Overriding to Secure Vault.');
             primaryGatewayId = 'sec_vault';
         } else {
             primaryGatewayId = this.decideRegularGateway(request);
         }
 
         // CIRCUIT BREAKER CHECK
-        if (!monitor.isHealthy(primaryGatewayId)) {
-            console.warn(`[Orchestration Engine] ⚡ Circuit Open for ${primaryGatewayId}. Immediate Failover triggered.`);
-            return this.executeWithFailover(request, 'stripe_us', risk);
+        if (!this.monitor.isHealthy(primaryGatewayId)) {
+            Logger.warn(`⚡ Circuit Open for ${primaryGatewayId}. Immediate Failover triggered.`, 'OrchestrationEngine');
+            return this.executeWithFailover(request, this.DEFAULT_GATEWAY_ID, risk);
         }
 
-        const gateway = this.gateways.get(primaryGatewayId) || this.gateways.get('stripe_us')!;
+        const gateway = this.gateways.get(primaryGatewayId) || this.gateways.get(this.DEFAULT_GATEWAY_ID)!;
 
         try {
-            console.log(`[RelayService] Primary Route: ${gateway.name}`);
+            Logger.info(`Primary Route: ${gateway.name}`, 'RelayService');
             const result = await gateway.process(request);
 
             // RECORD PERFORMANCE
-            monitor.record(primaryGatewayId, true, result.processingTimeMs);
+            this.monitor.record(primaryGatewayId, true, result.processingTimeMs);
 
             return { result, risk };
         } catch (error: any) {
-            console.warn(`[RelayService] Primary Route FAILED (${error.message}). Recording and Failing Over...`);
+            Logger.warn(`Primary Route FAILED (${error.message}). Recording and Failing Over...`, 'RelayService');
 
             // RECORD FAILURE
-            monitor.record(primaryGatewayId, false, Date.now() - startTime);
+            this.monitor.record(primaryGatewayId, false, Date.now() - startTime);
 
-            return this.executeWithFailover(request, 'stripe_us', risk, error.message);
+            return this.executeWithFailover(request, this.DEFAULT_GATEWAY_ID, risk, error.message);
         }
     }
 
     private async executeWithFailover(request: PaymentRequest, failoverId: string, risk: InternalRiskAssessment, originalError?: string): Promise<{ result: GatewayResponse, risk: InternalRiskAssessment }> {
-        const failoverGateway = this.gateways.get(failoverId)!;
+        const failoverGateway = this.gateways.get(failoverId);
+
+        if (!failoverGateway) {
+            throw new PaymentGatewayError(`Failover gateway ${failoverId} not found`, failoverId);
+        }
+
         const startTime = Date.now();
-        const result = await failoverGateway.process(request);
+        try {
+            const result = await failoverGateway.process(request);
 
-        // Record performance for failover too
-        monitor.record(failoverId, true, result.processingTimeMs);
+            // Record performance for failover too
+            this.monitor.record(failoverId, true, result.processingTimeMs);
 
-        return {
-            result: {
-                ...result,
-                retries: 1,
-                originalError,
-                message: 'Auto-Recovered via Dynamic Failover'
-            },
-            risk
-        };
+            return {
+                result: {
+                    ...result,
+                    retries: 1,
+                    originalError,
+                    message: 'Auto-Recovered via Dynamic Failover'
+                },
+                risk
+            };
+        } catch (error: any) {
+            Logger.error(`Failover Route FAILED: ${error.message}`, error, 'RelayService');
+            throw new PaymentGatewayError(`Failover to ${failoverId} failed: ${error.message}`, failoverId);
+        }
     }
 
     private decideRegularGateway(request: PaymentRequest): string {
         const { metadata, paymentMethod } = request;
         const hour = new Date(metadata.timestamp).getHours();
 
+        // 1. UK Local Optimization Rule
         if (metadata.userLocation.city.toLowerCase() === 'london' &&
             paymentMethod.brand === 'visa' &&
             (hour >= 0 && hour <= 5)) {
             return 'uk_local';
         }
 
-        if (['UK', 'FR', 'DE', 'ES', 'IT'].includes(metadata.userLocation.country)) {
+        // 2. Regional European Routing Rule
+        const euCountries = ['UK', 'FR', 'DE', 'ES', 'IT', 'NL', 'BE'];
+        if (euCountries.includes(metadata.userLocation.country)) {
             return 'adyen_eu';
         }
 
-        return 'stripe_us';
+        // 3. Fallback to standard
+        return this.DEFAULT_GATEWAY_ID;
     }
 }

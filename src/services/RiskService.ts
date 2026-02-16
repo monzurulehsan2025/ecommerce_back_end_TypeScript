@@ -1,4 +1,5 @@
 import type { PaymentRequest, InternalRiskAssessment, RiskLevel } from '../models/types.js';
+import { Logger } from '../utils/Logger.js';
 
 export class RiskService {
     /**
@@ -10,39 +11,73 @@ export class RiskService {
         const flags: string[] = [];
 
         // 1. High amount check
-        if (request.amount > 5000) {
-            score += 65;
-            flags.push('HIGH_TICKET_ITEM');
-        } else if (request.amount > 1000) {
-            score += 30;
-            flags.push('MODERATE_TICKET_ITEM');
-        }
+        score += this.checkAmount(request.amount, flags);
 
-        // 2. Velocity simulation (In real app, query DB for user's last X hour transactions)
-        // We'll simulate this with a flag if the user is anonymous or new
-        if (request.metadata.userId.startsWith('0000')) {
-            score += 20;
-            flags.push('NEW_USER_UNVERIFIED');
-        }
+        // 2. Velocity simulation
+        score += this.checkUserStatus(request.metadata.userId, flags);
 
         // 3. Currency/Location mismatch
+        score += this.checkLocationMismatch(request, flags);
+
+        // 4. Night-time high-risk window
+        score += this.checkTimeWindow(request.metadata.timestamp, flags);
+
+        const level = this.calculateLevel(score);
+
+        const assessment = {
+            score: Math.min(score, 100),
+            level,
+            flags
+        };
+
+        if (level === 'high') {
+            Logger.warn(`High risk transaction detected! Score: ${assessment.score}, Flags: ${flags.join(', ')}`, 'RiskService');
+        }
+
+        return assessment;
+    }
+
+    private static checkAmount(amount: number, flags: string[]): number {
+        if (amount > 5000) {
+            flags.push('HIGH_TICKET_ITEM');
+            return 65;
+        }
+        if (amount > 1000) {
+            flags.push('MODERATE_TICKET_ITEM');
+            return 30;
+        }
+        return 0;
+    }
+
+    private static checkUserStatus(userId: string, flags: string[]): number {
+        if (userId.startsWith('0000')) {
+            flags.push('NEW_USER_UNVERIFIED');
+            return 20;
+        }
+        return 0;
+    }
+
+    private static checkLocationMismatch(request: PaymentRequest, flags: string[]): number {
         const country = request.metadata.userLocation.country;
-        if (request.currency === 'USD' && country !== 'US' && country !== 'UK' && country !== 'CA') {
-            score += 25;
+        if (request.currency === 'USD' && !['US', 'UK', 'CA'].includes(country)) {
             flags.push('CURRENCY_LOCATION_MISMATCH');
+            return 25;
         }
+        return 0;
+    }
 
-        // 4. Night-time high-risk window (fraudsters often strike when support is low)
-        const hour = new Date(request.metadata.timestamp).getHours();
+    private static checkTimeWindow(timestamp: string, flags: string[]): number {
+        const hour = new Date(timestamp).getHours();
         if (hour >= 2 && hour <= 4) {
-            score += 10;
             flags.push('OFF_HOURS_TRANSACTION');
+            return 10;
         }
+        return 0;
+    }
 
-        let level: RiskLevel = 'low';
-        if (score >= 60) level = 'high';
-        else if (score >= 30) level = 'medium';
-
-        return { score: Math.min(score, 100), level, flags };
+    private static calculateLevel(score: number): RiskLevel {
+        if (score >= 60) return 'high';
+        if (score >= 30) return 'medium';
+        return 'low';
     }
 }

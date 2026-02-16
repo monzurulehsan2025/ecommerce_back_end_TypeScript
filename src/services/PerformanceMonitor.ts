@@ -1,4 +1,11 @@
-import type { GatewayPerformanceMetrics, GatewayResponse } from '../models/types.js';
+import type { GatewayPerformanceMetrics } from '../models/types.js';
+import { Logger } from '../utils/Logger.js';
+
+export enum CircuitState {
+    CLOSED = 'CLOSED',
+    OPEN = 'OPEN',
+    HALF_OPEN = 'HALF_OPEN'
+}
 
 class GatewayStats {
     public totalRequests = 0;
@@ -6,7 +13,7 @@ class GatewayStats {
     public totalLatency = 0;
     public consecutiveFailures = 0;
     public lastFailureTime = 0;
-    public state: 'CLOSED' | 'OPEN' | 'HALF_OPEN' = 'CLOSED';
+    public state: CircuitState = CircuitState.CLOSED;
 
     public update(success: boolean, latency: number) {
         this.totalRequests++;
@@ -14,7 +21,9 @@ class GatewayStats {
             this.successfulRequests++;
             this.totalLatency += latency;
             this.consecutiveFailures = 0;
-            if (this.state === 'HALF_OPEN') this.state = 'CLOSED';
+            if (this.state === CircuitState.HALF_OPEN) {
+                this.state = CircuitState.CLOSED;
+            }
         } else {
             this.consecutiveFailures++;
             this.lastFailureTime = Date.now();
@@ -35,6 +44,8 @@ class GatewayStats {
 export class PerformanceMonitor {
     private static instance: PerformanceMonitor;
     private stats: Map<string, GatewayStats> = new Map();
+    private readonly RECOVERY_TIMEOUT = 30000; // 30 seconds
+    private readonly FAILURE_THRESHOLD = 3;
 
     private constructor() { }
 
@@ -53,15 +64,15 @@ export class PerformanceMonitor {
         stat.update(success, latency);
 
         // Dynamic Circuit Breaker Logic
-        if (stat.consecutiveFailures >= 3 && stat.state === 'CLOSED') {
-            console.warn(`[CircuitBreaker] 🚨 Opening circuit for ${gatewayId} due to high failure rate.`);
-            stat.state = 'OPEN';
+        if (stat.consecutiveFailures >= this.FAILURE_THRESHOLD && stat.state === CircuitState.CLOSED) {
+            Logger.warn(`🚨 Opening circuit for ${gatewayId} due to high failure rate.`, 'CircuitBreaker');
+            stat.state = CircuitState.OPEN;
         }
 
-        // Attempt recovery after 30 seconds
-        if (stat.state === 'OPEN' && Date.now() - stat.lastFailureTime > 30000) {
-            console.info(`[CircuitBreaker] 🛡️ Attempting recovery for ${gatewayId} (HALF_OPEN).`);
-            stat.state = 'HALF_OPEN';
+        // Attempt recovery after timeout
+        if (stat.state === CircuitState.OPEN && Date.now() - stat.lastFailureTime > this.RECOVERY_TIMEOUT) {
+            Logger.info(`🛡️ Attempting recovery for ${gatewayId} (HALF_OPEN).`, 'CircuitBreaker');
+            stat.state = CircuitState.HALF_OPEN;
         }
     }
 
@@ -69,10 +80,10 @@ export class PerformanceMonitor {
         const stat = this.stats.get(gatewayId);
         if (!stat) return true;
 
-        if (stat.state === 'OPEN') {
+        if (stat.state === CircuitState.OPEN) {
             // Recheck timeout on every check
-            if (Date.now() - stat.lastFailureTime > 30000) {
-                stat.state = 'HALF_OPEN';
+            if (Date.now() - stat.lastFailureTime > this.RECOVERY_TIMEOUT) {
+                stat.state = CircuitState.HALF_OPEN;
                 return true;
             }
             return false;
